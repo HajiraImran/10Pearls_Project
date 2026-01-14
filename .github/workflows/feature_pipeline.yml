@@ -23,4 +23,4 @@ jobs:
       - name: Run Ingestion Script
         env:
           HOPSWORKS_KEY: ${{ secrets.HOPSWORKS_KEY }}
-        run: python data_pipeline/backfill.py
+        run: python data_pipeline/backfills.py
