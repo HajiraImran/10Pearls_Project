@@ -18,7 +18,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install hopsworks pandas scikit-learn joblib numpy python-dotenv
+          pip install "hopsworks==4.2.*"
+          pip install pyarrow pandas scikit-learn joblib numpy python-dotenv
 
       - name: Run Training Script
         env:
