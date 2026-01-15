@@ -1,27 +1,26 @@
-name: Daily Model Training
+name: Daily Training Pipeline
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Rozana raat 12 baje (UTC)
-  workflow_dispatch:      # Manual testing ke liye button
+    - cron: '0 0 * * *' # Rozana raat 12 baje chalega
+  workflow_dispatch:
 
 jobs:
   train:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          pip install "hopsworks==4.2.*"
-          pip install pyarrow pandas scikit-learn joblib numpy python-dotenv
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
 
-      - name: Run Training Script
+      - name: Run Training
         env:
           HOPSWORKS_KEY: ${{ secrets.HOPSWORKS_KEY }}
-        run: python training/train_models.py # <--- Aap ka folder aur file path
+        run: python training/train_models.py
