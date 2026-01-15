@@ -26,4 +26,5 @@ jobs:
       - name: Run Backfill/Update
         env:
           HOPSWORKS_KEY: ${{ secrets.HOPSWORKS_KEY }}
+          OPENWEATHER_KEY: ${{ secrets.OPENWEATHER_KEY }} # Ye add karein
         run: python data_pipeline/backfills.py # Ya aapka update script
