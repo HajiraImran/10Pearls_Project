@@ -1,27 +1,26 @@
-name: Hourly AQI Data Ingestion
+name: Hourly Feature Pipeline
 
 on:
   schedule:
-    - cron: '0 * * * *' # Har ghante khud chale ga
-  workflow_dispatch:      # Is se aap button daba kar khud bhi chala saktay hain
+    - cron: '0 * * * *' # Har ghante ke start par chalega
+  workflow_dispatch: # Manual run ka option bhi deta hai
 
 jobs:
-  ingest:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
-      - name: Install dependencies
-        run: |
-         pip install "hopsworks==4.2.*"
-          pip install pyarrow confluent-kafka fastavro pandas requests python-dotenv
-          
-      - name: Run Ingestion Script
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Backfill/Update
         env:
           HOPSWORKS_KEY: ${{ secrets.HOPSWORKS_KEY }}
-        run: python data_pipeline/backfills.py
+        run: python data_pipeline/backfills.py # Ya aapka update script
