@@ -1,0 +1,7 @@
+hopsworks
+pandas
+numpy
+scikit-learn
+joblib
+python-dotenv
+streamlit
