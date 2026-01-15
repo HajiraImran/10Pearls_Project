@@ -18,7 +18,10 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip
+          pip install hopsworks==4.2.*
+          pip install -r requirements.txt
 
       - name: Run Backfill/Update
         env:
