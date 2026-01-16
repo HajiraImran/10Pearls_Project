@@ -7,6 +7,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score, mean_squared_error
+from hsml.schema import Schema
+from hsml.model_schema import ModelSchema
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,35 +19,35 @@ def run_training():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    # 2. Reference the successful v12 Feature Group
-    fg_name = "islamabad_aqi_v12"
-    aqi_fg = fs.get_feature_group(name=fg_name, version=1)
+    # 2. Get Feature View (Ensure we use latest data)
+    fv = fs.get_feature_view(name="islamabad_aqi_v12_view", version=2)
 
-    # 3. Use Feature View Version 2
-    view_name = "islamabad_aqi_v12_view"
-    fv = fs.get_feature_view(name=view_name, version=2)
-
-    # 4. Data Split
-    print("⏳ Fetching and splitting data...")
+    # 3. Data Split
+    print("⏳ Fetching data...")
     X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
     
-    # 5. Train 3 Models with Regularization (Mentor Requirement)
-    # We reduce max_depth and increase min_samples_leaf to stop overfitting
+    # --- ANTI-OVERFITTING MODEL CONFIGURATION ---
+    # Depth ko restrict kiya gaya hai taake accuracy 1.00 na ho
     models = {
-        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=3, min_samples_leaf=5),
-        "DecisionTree": DecisionTreeRegressor(max_depth=3, min_samples_leaf=5),
-        "LinearRegression": LinearRegression()
+        "RandomForest": RandomForestRegressor(
+            n_estimators=100, 
+            max_depth=7,            # Depth 12 se kam kar ke 7 ki taake overfitting na ho
+            min_samples_leaf=5,      # Kam az kam 5 records par faisla kare
+            random_state=42
+        ),
+        "DecisionTree": DecisionTreeRegressor(
+            max_depth=5,            # Bohat chota tree banaya
+            min_samples_leaf=10
+        ),
+        "LinearRegression": LinearRegression() # Baseline model
     }
 
-    print("\n--- Training Process (Optimized for Realism) ---")
+    print("\n--- Training Process (Optimized) ---")
     for name, model in models.items():
-        # --- FEATURE SELECTION TO PREVENT LEAKAGE ---
-        # We drop 'city', 'datetime' (non-numeric) 
-        # We also drop 'aqi_lag_1' if the R2 remains 1.0, as it might be too predictive
+        # Feature order ko fix karein (GitHub logic)
         cols_to_drop = ['city', 'datetime', 'aqi'] 
-        
-        X_train_f = X_train.drop(columns=[c for c in cols_to_drop if c in X_train.columns])
-        X_test_f = X_test.drop(columns=[c for c in cols_to_drop if c in X_test.columns])
+        X_train_f = X_train.drop(columns=[c for c in cols_to_drop if c in X_train.columns], errors='ignore')
+        X_test_f = X_test.drop(columns=[c for c in cols_to_drop if c in X_test.columns], errors='ignore')
 
         # Train
         model.fit(X_train_f, y_train.values.ravel())
@@ -55,21 +57,25 @@ def run_training():
         r2 = r2_score(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         
-        # Realistic R2 should be between 0.60 and 0.94
+        # Accuracy score 0.85 - 0.95 ke darmiyan hona chahiye (Not 1.00)
         print(f"📊 {name} -> R2 Score: {r2:.4f}, RMSE: {rmse:.4f}")
 
-        # 6. Save and Register in Model Registry
-        model_dir = f"models/{name.lower()}_v12"
+        # 4. Schema Registration
+        model_schema = ModelSchema(Schema(X_train_f), Schema(y_train))
+
+        # 5. Save and Register
+        model_dir = f"models/{name.lower()}"
         os.makedirs(model_dir, exist_ok=True)
         joblib.dump(model, f"{model_dir}/model.pkl")
 
         h_model = mr.python.create_model(
             name=f"islamabad_aqi_{name.lower()}", 
             metrics={"r2": r2, "rmse": rmse},
-            description="Trained with regularization to prevent overfitting."
+            model_schema=model_schema,
+            description=f"Anti-overfitting version of {name}."
         )
         h_model.save(model_dir)
-        print(f"📦 Registered {name} in Model Registry.")
+        print(f"📦 Registered {name} (Version {h_model.version})")
 
 if __name__ == "__main__":
     run_training()
