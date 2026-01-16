@@ -20,7 +20,10 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install hopsworks==4.2.*
+          # Hopsworks ke saath [python] extra install karein jo kafka lata hai
+          pip install "hopsworks[python]" 
+          # Ya phir direct confluent-kafka install karein
+          pip install confluent-kafka
           pip install -r requirements.txt
 
       - name: Run Backfill/Update
