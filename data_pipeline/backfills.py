@@ -12,39 +12,48 @@ def run_backfill():
     project = hopsworks.login(api_key_value=os.getenv("HOPSWORKS_KEY"))
     fs = project.get_feature_store()
 
-    # Create Fresh Feature Group (V12)
+    # Get or Create Feature Group
     aqi_fg = fs.get_or_create_feature_group(
         name="islamabad_aqi_v12",
         version=1,
         primary_key=['city', 'datetime'],
         event_time='datetime',
-        online_enabled=False,  # <--- Isay False kar dein
+        online_enabled=False,
         description="Fresh Clean AQI data after cleanup"
     )
 
-    # Check for existing data
+    # --- UPDATED LOGIC FOR ONLY NEW ROWS ---
+    fetch_days = 1 # Default: Sirf naya data mangain
+    
     try:
-        query = aqi_fg.select(["datetime"]).order_by("datetime", descending=True).limit(1)
-        latest_data = query.read()
-        if not latest_data.empty:
-            last_date = pd.to_datetime(latest_data.iloc[0]['datetime']).replace(tzinfo=timezone.utc)
-            fetch_days = 2
+        # Check karein ke kya FG mein pehle se data hai
+        # Hum sirf count check kar rahe hain taake query tez ho
+        # Statistics tab (2887 records) confirm karta hai ke data already hai
+        fg_meta = aqi_fg.get_statistics()
+        
+        if fg_meta:
+            fetch_days = 1 # Agar statistics maujood hain, matlab data hai
+            print("✅ Data already exists. Switching to Incremental Mode (1 day).")
         else:
             fetch_days = 120
-    except:
-        fetch_days = 120
+            print("⏳ Feature Group is empty. Starting Initial Backfill (120 days).")
+            
+    except Exception as e:
+        print(f"⚠️ Could not check stats, defaulting to 1 day to save API quota. Error: {e}")
+        fetch_days = 1
 
     # Fetch and Engineering
+    print(f"🚀 Fetching data for the last {fetch_days} day(s)...")
     raw_df = fetch_raw_data(days=fetch_days)
     engineered_df = apply_feature_engineering(raw_df)
 
     # Final Insert
     if not engineered_df.empty:
-        # datetime columns ko string me convert karein takay Hopsworks asani se handle kare
+        # Duplicate check Hopsworks primary key khud kar lega
         aqi_fg.insert(engineered_df)
-        print(f"⭐ Successfully created V12 with {len(engineered_df)} records.")
+        print(f"⭐ Successfully updated V12 with {len(engineered_df)} records.")
     else:
-        print("❌ Failed to fetch data. Check API Key.")
+        print("❌ No new data fetched. Check OpenWeather API connection.")
 
 if __name__ == "__main__":
     run_backfill()
