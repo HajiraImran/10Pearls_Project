@@ -27,16 +27,16 @@ def run_training():
     X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
     
     # --- ANTI-OVERFITTING MODEL CONFIGURATION ---
-    # Depth ko restrict kiya gaya hai taake accuracy 1.00 na ho
+    
     models = {
         "RandomForest": RandomForestRegressor(
             n_estimators=100, 
-            max_depth=7,            # Depth 12 se kam kar ke 7 ki taake overfitting na ho
-            min_samples_leaf=5,      # Kam az kam 5 records par faisla kare
+            max_depth=7,            
+            min_samples_leaf=5,      
             random_state=42
         ),
         "DecisionTree": DecisionTreeRegressor(
-            max_depth=5,            # Bohat chota tree banaya
+            max_depth=5,            
             min_samples_leaf=10
         ),
         "LinearRegression": LinearRegression() # Baseline model
@@ -44,7 +44,7 @@ def run_training():
 
     print("\n--- Training Process (Optimized) ---")
     for name, model in models.items():
-        # Feature order ko fix karein (GitHub logic)
+        
         cols_to_drop = ['city', 'datetime', 'aqi'] 
         X_train_f = X_train.drop(columns=[c for c in cols_to_drop if c in X_train.columns], errors='ignore')
         X_test_f = X_test.drop(columns=[c for c in cols_to_drop if c in X_test.columns], errors='ignore')
@@ -57,7 +57,7 @@ def run_training():
         r2 = r2_score(y_test, preds)
         rmse = np.sqrt(mean_squared_error(y_test, preds))
         
-        # Accuracy score 0.85 - 0.95 ke darmiyan hona chahiye (Not 1.00)
+        
         print(f"📊 {name} -> R2 Score: {r2:.4f}, RMSE: {rmse:.4f}")
 
         # 4. Schema Registration
