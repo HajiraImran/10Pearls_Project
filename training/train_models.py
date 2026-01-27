@@ -1,81 +1,100 @@
 import hopsworks
+import pandas as pd
 import joblib
 import os
-import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error
-from hsml.schema import Schema
-from hsml.model_schema import ModelSchema
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.metrics import r2_score, mean_absolute_error
 from dotenv import load_dotenv
 
 load_dotenv()
 
-def run_training():
-    # 1. Login to Hopsworks
+def train_and_select_best():
+    # 1. Hopsworks Connection
     project = hopsworks.login(api_key_value=os.getenv("HOPSWORKS_KEY"))
     fs = project.get_feature_store()
-    mr = project.get_model_registry()
 
-    # 2. Get Feature View (Ensure we use latest data)
-    fv = fs.get_feature_view(name="islamabad_aqi_v12_view", version=2)
+    # 2. Get the Feature View you created manually
+    try:
+        fv = fs.get_feature_view(name="islamabad_aqi_viewss", version=1)
+        print("✅ Feature View 'islamabad_aqi_viewss' retrieved successfully!")
+    except Exception as e:
+        print(f"❌ Error: Could not find the FV. Check name in Hopsworks UI: {e}")
+        return
 
-    # 3. Data Split
-    print("⏳ Fetching data...")
+    # 3. Train-Test Split
+    # Is point par Hopsworks background mein query run karke data fetch karega
     X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
+
+    # 4. Feature Selection & Cleaning (Protecting against leakage)
+    # Humein sirf 'aqi' ko target rakhna hai, baqi pollution indicators drop karne hain
+    cols_to_drop = ['aqi', 'pm2_5', 'city', 'datetime', 'timestamp', 'no2', 'so2']
     
-    # --- ANTI-OVERFITTING MODEL CONFIGURATION ---
+    def clean_features(df):
+        # Drop metadata and target-related columns
+        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+        # Sirf numeric columns rakhein (hour, temp, humidity, lags, etc.)
+        return df.select_dtypes(include=['number']).fillna(0)
+
+    X_train = clean_features(X_train)
+    X_test = clean_features(X_test)
     
+    print(f"🚀 Features being used: {list(X_train.columns)}")
+
+    # 5. Define 3 Competitive Models
     models = {
-        "RandomForest": RandomForestRegressor(
-            n_estimators=100, 
-            max_depth=7,            
-            min_samples_leaf=5,      
-            random_state=42
-        ),
-        "DecisionTree": DecisionTreeRegressor(
-            max_depth=5,            
-            min_samples_leaf=10
-        ),
-        "LinearRegression": LinearRegression() # Baseline model
+        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=6, random_state=42),
+        "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=4, random_state=42),
+        "GradientBoosting": GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
     }
 
-    print("\n--- Training Process (Optimized) ---")
-    for name, model in models.items():
-        
-        cols_to_drop = ['city', 'datetime', 'aqi'] 
-        X_train_f = X_train.drop(columns=[c for c in cols_to_drop if c in X_train.columns], errors='ignore')
-        X_test_f = X_test.drop(columns=[c for c in cols_to_drop if c in X_test.columns], errors='ignore')
+    best_model = None
+    best_r2 = -1
+    best_name = ""
+    best_metrics = {}
 
-        # Train
-        model.fit(X_train_f, y_train.values.ravel())
+    mr = project.get_model_registry()
+    print("\n--- Model Competition Starting ---")
+
+    # 6. Training & Evaluation Loop
+    for name, m in models.items():
+        m.fit(X_train, y_train)
+        preds = m.predict(X_test)
         
-        # Evaluate
-        preds = model.predict(X_test_f)
         r2 = r2_score(y_test, preds)
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        mae = mean_absolute_error(y_test, preds)
         
+        print(f"📊 {name}: R2 = {r2:.4f}, MAE = {mae:.2f}")
+
+        # Individual model registration (Version tracking ke liye)
+        model_filename = f"{name.lower()}_aqi.pkl"
+        joblib.dump(m, model_filename)
         
-        print(f"📊 {name} -> R2 Score: {r2:.4f}, RMSE: {rmse:.4f}")
-
-        # 4. Schema Registration
-        model_schema = ModelSchema(Schema(X_train_f), Schema(y_train))
-
-        # 5. Save and Register
-        model_dir = f"models/{name.lower()}"
-        os.makedirs(model_dir, exist_ok=True)
-        joblib.dump(model, f"{model_dir}/model.pkl")
-
-        h_model = mr.python.create_model(
-            name=f"islamabad_aqi_{name.lower()}", 
-            metrics={"r2": r2, "rmse": rmse},
-            model_schema=model_schema,
-            description=f"Anti-overfitting version of {name}."
+        hw_model = mr.python.create_model(
+            name=f"islamabad_aqi_{name.lower()}",
+            metrics={"r2": r2, "mae": mae},
+            description=f"{name} trained on weather-augmented Islamabad data"
         )
-        h_model.save(model_dir)
-        print(f"📦 Registered {name} (Version {h_model.version})")
+        hw_model.save(model_filename)
+        
+        # Keep track of the winner
+        if r2 > best_r2:
+            best_r2 = r2
+            best_model = m
+            best_name = name
+            best_metrics = {"r2": r2, "mae": mae}
+
+    print(f"\n🏆 WINNER: {best_name} (R2: {best_r2:.4f})")
+    
+    # 7. Register the "BEST" model separately for the App to use
+    joblib.dump(best_model, "best_model.pkl")
+    final_model = mr.python.create_model(
+        name="best_islamabad_aqi_model",
+        metrics=best_metrics,
+        description=f"Best performing model ({best_name}) for production app"
+    )
+    final_model.save("best_model.pkl")
+    print("✅ Best model registered as 'best_islamabad_aqi_model'!")
 
 if __name__ == "__main__":
-    run_training()
+    train_and_select_best()

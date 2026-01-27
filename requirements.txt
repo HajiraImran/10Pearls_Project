@@ -5,3 +5,9 @@ scikit-learn
 joblib
 python-dotenv
 streamlit
+requests
+# TensorFlow for the ANN model
+tensorflow>=2.15.0
+# Optional: seaborn for EDA/Advanced Analytics
+seaborn
+matplotlib
