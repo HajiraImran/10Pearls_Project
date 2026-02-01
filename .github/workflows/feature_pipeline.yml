@@ -23,6 +23,7 @@ jobs:
           # Hopsworks ke saath [python] extra install karein jo kafka lata hai
           pip install "hopsworks[python]" 
           # Ya phir direct confluent-kafka install karein
+          pip install meteostat
           pip install confluent-kafka
           pip install -r requirements.txt
 
