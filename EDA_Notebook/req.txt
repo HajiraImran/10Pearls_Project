@@ -1,0 +1,3 @@
+https://drive.google.com/file/d/155UtdVXucB_o3ZrKOjawqyyrPVz_haiD/view?usp=sharing
+
+colab notebook code for all visualizations
