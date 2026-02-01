@@ -115,3 +115,37 @@ def apply_feature_engineering(df):
     numeric_cols = df.select_dtypes(include=['number']).columns
     df[numeric_cols] = df[numeric_cols].ffill().bfill()
     return df.fillna(0)
+
+def fetch_historical_aqi_data(fs, num_days=7):
+    """
+    Hopsworks Feature Store se pichle 7 din ka data nikalta hai taake dashboard par graph dikhaya ja sakay.
+    """
+    try:
+        # 1. Feature Group connect karein (v5 as you mentioned)
+        fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
+        
+        # 2. Poora data read karein
+        # (Chunke data zyada bada nahi hota, read() fine hai, warna query bhi use ho sakti hai)
+        query_df = fg.read()
+        
+        # 3. Filter for last 7 days
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=num_days)
+        
+        # Datetime ensure karein
+        query_df['datetime'] = pd.to_datetime(query_df['datetime'])
+        if query_df['datetime'].dt.tz is None:
+            query_df['datetime'] = query_df['datetime'].dt.tz_localize('UTC')
+        
+        historical_df = query_df[query_df['datetime'] >= start_date]
+        
+        # 4. Rozana ki average nikalna (Daily Trend ke liye)
+        historical_df['date_only'] = historical_df['datetime'].dt.date
+        daily_avg = historical_df.groupby('date_only')['aqi'].mean().reset_index()
+        daily_avg.rename(columns={'date_only': 'Date', 'aqi': 'Average AQI'}, inplace=True)
+        
+        return daily_avg.sort_values('Date')
+        
+    except Exception as e:
+        print(f"Error fetching historical data: {e}")
+        return pd.DataFrame()
