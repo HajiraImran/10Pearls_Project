@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # --- CONFIG & TIMEZONE ---
 load_dotenv()
-pk_tz = pytz.timezone('Asia/Islamabad')
+pk_tz = pytz.timezone('Asia/Karachi')
 now_pk = datetime.now(pk_tz)
 
 st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
