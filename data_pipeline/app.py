@@ -20,7 +20,6 @@ st.set_page_config(page_title="Islamabad AQI Predictor", layout="wide", page_ico
 # --- ASSET LOADING ---
 @st.cache_resource(ttl=3600) 
 def load_assets():
-    # Secret handling for Local vs Cloud
     if "HOPSWORKS_KEY" in st.secrets:
         api_key = st.secrets["HOPSWORKS_KEY"]
     else:
@@ -30,7 +29,6 @@ def load_assets():
     mr = project.get_model_registry()
     fs = project.get_feature_store()
     
-    # Best Model Version check
     best_models_list = mr.get_models("best_islamabad_aqi_model")
     model_meta = max(best_models_list, key=lambda m: m.version)
     model_dir = model_meta.download()
@@ -41,16 +39,15 @@ def load_assets():
 try:
     model, best_meta, fs = load_assets()
     
-    # ⚠️ CRITICAL FIX: EXACT FEATURE NAMES & ORDER AS PER YOUR TRAINING
-    # Note: Training mein 'temp' hai, 'temperature' nahi.
-    # Order: aqi_lag_1 is usually first in these FV queries.
+    # ✅ EXACT ORDER & NAMES FIXED (Based on your Error Message)
+    # Model expects 'temperature' (NOT 'temp') and starts with 'aqi_lag_1'
     TRAINING_FEATURES = [
         'aqi_lag_1', 
         'humidity', 
         'hour', 
         'month', 
         'pm2_5_rolling_6h', 
-        'temp', 
+        'temperature', 
         'weekday', 
         'wind_speed', 
         'wind_stagnant'
@@ -74,7 +71,7 @@ try:
     
     m1, m2, m3 = st.columns(3)
     m1.metric("Current AQI", int(last_aqi))
-    m2.metric("Temp (Forecast)", f"{forecast_weather.iloc[0]['temperature']:.1f}°C")
+    m2.metric("Temp", f"{forecast_weather.iloc[0]['temperature']:.1f}°C")
     m3.metric("PM2.5 Rolling", f"{last_pm25:.1f}")
 
     # --- FORECAST LOOP ---
@@ -94,27 +91,27 @@ try:
     
 
     for i, row in future_df.iterrows():
-        # Mapping app data to training feature names
+        # Feature dictionary matching TRAINING_FEATURES exactly
         feat_dict = {
-            'aqi_lag_1': current_aqi_lag,
+            'aqi_lag_1': float(current_aqi_lag),
             'humidity': float(row['humidity']),
             'hour': float(row['datetime'].hour),
             'month': float(row['datetime'].month),
-            'pm2_5_rolling_6h': current_pm25,
-            'temp': float(row['temperature']), # App uses 'temperature', Model uses 'temp'
+            'pm2_5_rolling_6h': float(current_pm25),
+            'temperature': float(row['temperature']), # Key name FIXED to 'temperature'
             'weekday': float(row['datetime'].weekday()),
             'wind_speed': float(row['wind_speed']),
             'wind_stagnant': 1.0 if float(row['wind_speed']) < 2.5 else 0.0
         }
         
-        # Force exact alignment
+        # Enforce exact training column order
         feat_df = pd.DataFrame([feat_dict])[TRAINING_FEATURES]
         
         # Predict
         pred = model.predict(feat_df)[0]
         aqi_val = int(np.clip(round(pred), 1, 5))
         
-        # Update state
+        # Recursive Updates
         current_aqi_lag = float(pred)
         current_pm25 = current_pm25 * 0.9 + (pred * 5.0) * 0.1
 
@@ -123,16 +120,14 @@ try:
         with f_cols[i]:
             st.markdown(f"""
                 <div style="background: rgba(255,255,255,0.05); padding:20px; border-radius:15px; border-top: 5px solid {color}; text-align:center;">
-                    <p>{row['datetime'].strftime('%A, %d %b')}</p>
+                    <p style="color:#888;">{row['datetime'].strftime('%A, %d %b')}</p>
                     <h2 style="color:{color};">{icon} {label}</h2>
                     <h1 style="font-size: 3.5rem; margin:0;">{aqi_val}</h1>
+                    <p style="font-size: 0.8rem; opacity:0.7;">🌡️ {row['temperature']:.0f}°C | 💨 {row['wind_speed']:.1f} km/h</p>
                 </div>
             """, unsafe_allow_html=True)
 
 except Exception as e:
-    st.error(f"Error: {e}")
-    # Display features help if error persists
-    if "feature_names mismatch" in str(e):
-        st.info("⚠️ Feature Order ka masla hai. Apne TRAINING_FEATURES list ko error message ke mutabiq adjust karein.")
+    st.error(f"Prediction Error: {e}")
 
 st.markdown('<div class="footer">Islamabad AQI MLOps • Hopsworks 4.2</div>', unsafe_allow_html=True)
