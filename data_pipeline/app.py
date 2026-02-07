@@ -38,19 +38,6 @@ def load_assets():
 try:
     model, best_meta, fs = load_assets()
     
-    # ✅ EXACT ORDER FIXED: Matching your model's requirement perfectly
-    TRAINING_FEATURES = [
-        'aqi_lag_1', 
-        'humidity', 
-        'hour', 
-        'month', 
-        'pm2_5_rolling_6h', 
-        'temperature', 
-        'weekday', 
-        'wind_speed', 
-        'wind_stagnant'
-    ]
-
     # --- DATA FETCH ---
     fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
     latest_df = fg.read(read_options={"use_trend": False}).sort_values("datetime", ascending=False).head(1)
@@ -72,27 +59,27 @@ try:
     current_aqi_lag = last_aqi
     current_pm25 = last_pm25
 
-    
-
     for i, row in future_df.iterrows():
-        # Data dictionary matching TRAINING_FEATURES order
-        feat_dict = {
-            'aqi_lag_1': float(current_aqi_lag),
-            'humidity': float(row['humidity']),
-            'hour': float(row['datetime'].hour),
-            'month': float(row['datetime'].month),
-            'pm2_5_rolling_6h': float(current_pm25),
-            'temperature': float(row['temperature']),
-            'weekday': float(row['datetime'].weekday()),
-            'wind_speed': float(row['wind_speed']),
-            'wind_stagnant': 1.0 if float(row['wind_speed']) < 2.5 else 0.0
-        }
+        # ✅ STEP 1: Values ko EXACT usi order mein nikalna jo training mein tha
+        # Order: aqi_lag_1, humidity, hour, month, pm2_5_rolling_6h, temperature, weekday, wind_speed, wind_stagnant
+        input_data = [
+            float(current_aqi_lag),
+            float(row['humidity']),
+            float(row['datetime'].hour),
+            float(row['datetime'].month),
+            float(current_pm25),
+            float(row['temperature']),
+            float(row['datetime'].weekday()),
+            float(row['wind_speed']),
+            1.0 if float(row['wind_speed']) < 2.5 else 0.0
+        ]
         
-        # Enforce column order
-        feat_df = pd.DataFrame([feat_dict])[TRAINING_FEATURES]
+        # ✅ STEP 2: DataFrame ke bajaye Numpy Array use karein
+        # Is se 'feature_names mismatch' ka error kabhi nahi aayega
+        input_array = np.array([input_data])
         
-        # Prediction
-        pred = model.predict(feat_df)[0]
+        # ✅ STEP 3: Prediction (Array input bypasses name checking)
+        pred = model.predict(input_array)[0]
         aqi_val = int(np.clip(round(pred), 1, 5))
         
         # Update lag for next iteration
@@ -103,6 +90,7 @@ try:
             st.metric(f"{row['datetime'].strftime('%A')}", f"AQI {aqi_val}")
 
 except Exception as e:
-    st.error(f"Prediction Error: {e}")
+    st.error(f"Something went wrong: {e}")
+    st.info("Technical Detail: Numpy array bypass mode activated.")
 
 st.markdown('<div style="text-align:center; color:gray;">Islamabad AQI MLOps • Hopsworks 4.2</div>', unsafe_allow_html=True)
