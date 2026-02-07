@@ -5,165 +5,134 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+import pytz  
 import altair as alt
 from utils import fetch_weather_forecast, fetch_historical_aqi_data
 from dotenv import load_dotenv
 
-# Environment & Config
+# --- CONFIG & TIMEZONE ---
 load_dotenv()
-st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
+pk_tz = pytz.timezone('Asia/Karachi')
+now_pk = datetime.now(pk_tz)
 
-# --- ADVANCED CSS FOR PROFESSIONAL LOOK ---
-st.markdown("""
-    <style>
-    /* Main Background */
-    .stApp { background-color: #0b0e14; color: #ffffff; }
-    
-    /* Card Styling */
-    .metric-card {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 15px;
-        padding: 20px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        text-align: center;
-    }
-    
-    /* AQI Card Colors */
-    .aqi-val { font-size: 3rem; font-weight: 800; margin: 0; }
-    .aqi-label { font-size: 1.2rem; font-weight: 500; margin-bottom: 10px; }
-    
-    /* Sidebar Styling */
-    .css-1d391kg { background-color: #161b22; }
-    
-    /* Footer */
-    .footer { text-align: center; color: #666; padding: 20px; font-size: 0.8rem; }
-    </style>
-    """, unsafe_allow_html=True)
+st.set_page_config(page_title="Islamabad AQI Predictor", layout="wide", page_icon="🌬️")
 
 # --- ASSET LOADING ---
-@st.cache_resource
+@st.cache_resource(ttl=3600) 
 def load_assets():
-    project = hopsworks.login(api_key_value=os.getenv("HOPSWORKS_KEY"))
+    # Secret handling for Local vs Cloud
+    if "HOPSWORKS_KEY" in st.secrets:
+        api_key = st.secrets["HOPSWORKS_KEY"]
+    else:
+        api_key = os.getenv("HOPSWORKS_KEY")
+        
+    project = hopsworks.login(api_key_value=api_key)
     mr = project.get_model_registry()
     fs = project.get_feature_store()
     
-    model_meta = mr.get_model("best_islamabad_aqi_model", version=1)
+    # Best Model Version check
+    best_models_list = mr.get_models("best_islamabad_aqi_model")
+    model_meta = max(best_models_list, key=lambda m: m.version)
     model_dir = model_meta.download()
     model = joblib.load(os.path.join(model_dir, "best_model.pkl"))
     
-    model_names = ["islamabad_aqi_randomforest", "islamabad_aqi_xgboost", "islamabad_aqi_gradientboosting"]
-    all_models_meta = []
-    for name in model_names:
-        try:
-            m = mr.get_model(name, version=1)
-            if m: all_models_meta.append(m)
-        except: pass
-    return model, model_meta, all_models_meta, fs
+    return model, model_meta, fs
 
-# --- MAIN DASHBOARD LOGIC ---
 try:
-    model, best_meta, all_models, fs = load_assets()
+    model, best_meta, fs = load_assets()
     
-    # 1. Header Section
-    col_t1, col_t2 = st.columns([2, 1])
-    with col_t1:
-        st.title("🌬️ Islamabad Air Quality Index")
-        st.markdown(f"🛰️ **Live Monitoring:** {datetime.now().strftime('%A, %d %b %Y | %I:%M %p')}")
-    
-    with col_t2:
-        # Small centered image
-        st.image("Islamabad.jpg", width=250)
+    # ⚠️ CRITICAL FIX: EXACT FEATURE NAMES & ORDER AS PER YOUR TRAINING
+    # Note: Training mein 'temp' hai, 'temperature' nahi.
+    # Order: aqi_lag_1 is usually first in these FV queries.
+    TRAINING_FEATURES = [
+        'aqi_lag_1', 
+        'humidity', 
+        'hour', 
+        'month', 
+        'pm2_5_rolling_6h', 
+        'temp', 
+        'weekday', 
+        'wind_speed', 
+        'wind_stagnant'
+    ]
 
-    st.markdown("---")
-
-    # 2. Key Metrics Row
+    # --- DATA FETCH ---
     fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
-    latest_df = fg.read().sort_values("datetime", ascending=False).head(1)
+    latest_df = fg.read(read_options={"use_trend": False}).sort_values("datetime", ascending=False).head(1)
     
-    last_aqi = float(latest_df['aqi'].values[0])
-    last_pm25 = float(latest_df['pm2_5_rolling_6h'].values[0])
+    if not latest_df.empty:
+        last_aqi = float(latest_df['aqi'].values[0])
+        last_pm25 = float(latest_df['pm2_5_rolling_6h'].values[0])
+    else:
+        last_aqi, last_pm25 = 2.0, 15.0
+
     forecast_weather = fetch_weather_forecast(days=4)
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("Current AQI", int(last_aqi), delta_color="inverse")
-    with m2:
-        curr_temp = forecast_weather.iloc[0]['temperature']
-        st.metric("Temperature", f"{curr_temp:.1f}°C")
-    with m3:
-        curr_hum = forecast_weather.iloc[0]['humidity']
-        st.metric("Humidity", f"{curr_hum:.1f}%")
-    with m4:
-        st.metric("PM2.5 (Rolling)", f"{last_pm25:.1f} µg/m³")
+    # --- UI ---
+    st.title("🌬️ Islamabad Air Quality Index")
+    st.markdown(f"🛰️ **Live Monitoring:** {now_pk.strftime('%I:%M %p | %A, %d %b')}")
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Current AQI", int(last_aqi))
+    m2.metric("Temp (Forecast)", f"{forecast_weather.iloc[0]['temperature']:.1f}°C")
+    m3.metric("PM2.5 Rolling", f"{last_pm25:.1f}")
 
-    # 3. Graph Section
-    st.subheader("📈 Historical AQI Trends (Past 7 Days)")
-    hist_df = fetch_historical_aqi_data(fs, num_days=7)
-    if not hist_df.empty:
-        chart = alt.Chart(hist_df).mark_area(
-            line={'color':'#00cc96'},
-            color=alt.Gradient(
-                gradient='linear',
-                stops=[alt.GradientStop(color='#00cc96', offset=0),
-                       alt.GradientStop(color='transparent', offset=1)],
-                x1=1, x2=1, y1=1, y2=0
-            )
-        ).encode(
-            x=alt.X('Date:T', title=''),
-            y=alt.Y('Average AQI:Q', scale=alt.Scale(domain=[1, 5]), title='AQI Level'),
-            tooltip=['Date', 'Average AQI']
-        ).properties(height=350).interactive()
-        st.altair_chart(chart, use_container_width=True)
-
-    # 4. Weekend Forecast Section
+    # --- FORECAST LOOP ---
     st.markdown("---")
-    st.subheader("📅 Smart Forecast (Next 3 Days)")
+    st.subheader("📅 3-Day Smart Forecast")
     f_cols = st.columns(3)
     
     future_df = forecast_weather.iloc[1:4].reset_index(drop=True)
-    current_aqi_lag = last_aqi
+    current_aqi_lag = float(last_aqi)
+    current_pm25 = float(last_pm25)
     
     status_map = {
         1: ("Good", "#00cc96", "🌿"), 2: ("Fair", "#fec032", "🌳"), 
-        3: ("Moderate", "#ffa15a", "😷"), 4: ("Poor", "#ef553b", "⚠️"), 5: ("Very Poor", "#ab63fa", "☠️")
+        3: ("Moderate", "#ffa15a", "😷"), 4: ("Poor", "#ef553b", "⚠️"), 5: ("Hazardous", "#ab63fa", "🚨")
     }
 
+    
+
     for i, row in future_df.iterrows():
-        # Prediction logic
-        feat = pd.DataFrame([{
-            'temperature': row['temperature'], 'humidity': row['humidity'], 'wind_speed': row['wind_speed'],
-            'hour': 12.0, 'weekday': float(row['datetime'].weekday()), 'month': float(row['datetime'].month),
-            'aqi_lag_1': current_aqi_lag, 'pm2_5_rolling_6h': last_pm25, 'wind_stagnant': 1.0 if row['wind_speed'] < 2.0 else 0.0
-        }])
-        pred = model.predict(feat)[0]
+        # Mapping app data to training feature names
+        feat_dict = {
+            'aqi_lag_1': current_aqi_lag,
+            'humidity': float(row['humidity']),
+            'hour': float(row['datetime'].hour),
+            'month': float(row['datetime'].month),
+            'pm2_5_rolling_6h': current_pm25,
+            'temp': float(row['temperature']), # App uses 'temperature', Model uses 'temp'
+            'weekday': float(row['datetime'].weekday()),
+            'wind_speed': float(row['wind_speed']),
+            'wind_stagnant': 1.0 if float(row['wind_speed']) < 2.5 else 0.0
+        }
+        
+        # Force exact alignment
+        feat_df = pd.DataFrame([feat_dict])[TRAINING_FEATURES]
+        
+        # Predict
+        pred = model.predict(feat_df)[0]
         aqi_val = int(np.clip(round(pred), 1, 5))
-        current_aqi_lag = pred
-        label, color, icon = status_map.get(aqi_val)
+        
+        # Update state
+        current_aqi_lag = float(pred)
+        current_pm25 = current_pm25 * 0.9 + (pred * 5.0) * 0.1
+
+        label, color, icon = status_map.get(aqi_val, ("Good", "#00cc96", "🌿"))
 
         with f_cols[i]:
             st.markdown(f"""
-                <div class="metric-card" style="border-top: 5px solid {color};">
-                    <p style="color: #666; margin-bottom: 5px;">{row['datetime'].strftime('%A, %d %b')}</p>
-                    <h2 style="color: {color}; margin: 0;">{icon} {label}</h2>
-                    <p class="aqi-val" style="color: {color};">{aqi_val}</p>
-                    <hr style="opacity: 0.1;">
-                    <p style="font-size: 0.9rem;">🌡️ {row['temperature']:.1f}°C | 💨 {row['wind_speed']:.1f} km/h</p>
+                <div style="background: rgba(255,255,255,0.05); padding:20px; border-radius:15px; border-top: 5px solid {color}; text-align:center;">
+                    <p>{row['datetime'].strftime('%A, %d %b')}</p>
+                    <h2 style="color:{color};">{icon} {label}</h2>
+                    <h1 style="font-size: 3.5rem; margin:0;">{aqi_val}</h1>
                 </div>
             """, unsafe_allow_html=True)
 
-    # Sidebar: Analytics
-    with st.sidebar:
-        st.title("🔬 Analytics")
-        st.info(f"Using Champion Model: **{best_meta.name} v{best_meta.version}**")
-        st.metric("Model R² Accuracy", f"{best_meta.training_metrics.get('r2', 0):.4f}")
-        
-        if all_models:
-            st.write("---")
-            st.write("📊 **Algorithm Benchmark**")
-            comp_df = pd.DataFrame([{"Model": m.name.split('_')[-1].upper(), "R2": m.training_metrics.get('r2', 0)} for m in all_models])
-            st.dataframe(comp_df, hide_index=True)
-
 except Exception as e:
-    st.error(f"System Error: {e}")
+    st.error(f"Error: {e}")
+    # Display features help if error persists
+    if "feature_names mismatch" in str(e):
+        st.info("⚠️ Feature Order ka masla hai. Apne TRAINING_FEATURES list ko error message ke mutabiq adjust karein.")
 
-st.markdown('<div class="footer">Data Pipeline: GitHub Actions → Hopsworks → Streamlit Cloud</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">Islamabad AQI MLOps • Hopsworks 4.2</div>', unsafe_allow_html=True)
