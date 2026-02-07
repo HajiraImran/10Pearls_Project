@@ -5,12 +5,16 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+import pytz  # For Timezone Sync
 import altair as alt
 from utils import fetch_weather_forecast, fetch_historical_aqi_data
 from dotenv import load_dotenv
 
-# Environment & Config
+# --- CONFIG & TIMEZONE ---
 load_dotenv()
+pk_tz = pytz.timezone('Asia/Islamabad')
+now_pk = datetime.now(pk_tz)
+
 st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
 
 # --- ADVANCED CSS ---
@@ -29,29 +33,22 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- ASSET LOADING (Forced Latest Version Logic for Hopsworks 4.2) ---
+# --- ASSET LOADING ---
 @st.cache_resource(ttl=3600) 
 def load_assets():
-    # Login to Hopsworks
-    project = hopsworks.login(api_key_value=os.getenv("HOPSWORKS_KEY"))
+    # Login using Secrets or Env
+    api_key = st.secrets["HOPSWORKS_KEY"] if "HOPSWORKS_KEY" in st.secrets else os.getenv("HOPSWORKS_KEY")
+    project = hopsworks.login(api_key_value=api_key)
     mr = project.get_model_registry()
     fs = project.get_feature_store()
     
-    # FIX: Use get_models() to find the absolute highest version (e.g., v11)
-    # This avoids the "Defaulting to 1" VersionWarning
+    # Model Loading (Latest Version)
     best_models_list = mr.get_models("best_islamabad_aqi_model")
-    if not best_models_list:
-        st.error("Model 'best_islamabad_aqi_model' not found in Registry!")
-        st.stop()
-    
-    # Sort and pick the max version object
     model_meta = max(best_models_list, key=lambda m: m.version)
-    
-    # Download and load the pickle file
     model_dir = model_meta.download()
     model = joblib.load(os.path.join(model_dir, "best_model.pkl"))
     
-    # Benchmark Models (Loading latest version for each)
+    # Benchmark Models
     model_names = ["islamabad_aqi_randomforest", "islamabad_aqi_xgboost", "islamabad_aqi_gradientboosting"]
     all_models_meta = []
     for name in model_names:
@@ -59,8 +56,7 @@ def load_assets():
             versions = mr.get_models(name)
             if versions:
                 all_models_meta.append(max(versions, key=lambda v: v.version))
-        except: 
-            pass
+        except: pass
             
     return model, model_meta, all_models_meta, fs
 
@@ -71,24 +67,31 @@ try:
     col_t1, col_t2 = st.columns([2, 1])
     with col_t1:
         st.title("🌬️ Islamabad Air Quality Index")
-        st.markdown(f"🛰️ **Live Monitoring:** {datetime.now().strftime('%A, %d %b %Y | %I:%M %p')}")
+        st.markdown(f"🛰️ **Live Monitoring (PKT):** {now_pk.strftime('%A, %d %b %Y | %I:%M %p')}")
     with col_t2:
         if os.path.exists("Islamabad.jpg"):
             st.image("Islamabad.jpg", width=250)
 
     st.markdown("---")
 
-    # 2. Key Metrics Row
+    # 2. Key Metrics Row (Fresh Data Logic)
     fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
-    latest_df = fg.read().sort_values("datetime", ascending=False).head(1)
     
-    last_aqi = float(latest_df['aqi'].values[0])
-    last_pm25 = float(latest_df['pm2_5_rolling_6h'].values[0])
+    # Force reading latest data without trend/cache issues
+    latest_df = fg.read(read_options={"use_trend": False}).sort_values("datetime", ascending=False).head(1)
+    
+    if not latest_df.empty:
+        last_aqi = float(latest_df['aqi'].values[0])
+        last_pm25 = float(latest_df['pm2_5_rolling_6h'].values[0])
+    else:
+        st.warning("⚠️ Waiting for fresh data from Hopsworks...")
+        last_aqi, last_pm25 = 1.0, 10.0
+
     forecast_weather = fetch_weather_forecast(days=4)
 
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Current AQI", int(last_aqi), delta_color="inverse")
+        st.metric("Current AQI", int(last_aqi))
     with m2:
         st.metric("Temperature", f"{forecast_weather.iloc[0]['temperature']:.1f}°C")
     with m3:
@@ -97,7 +100,7 @@ try:
         st.metric("PM2.5 (Rolling)", f"{last_pm25:.1f} µg/m³")
 
     # 3. Graph Section
-    st.subheader("📈 Historical AQI Trends (Past 7 Days)")
+    st.subheader("📈 Historical AQI Trends (Islamabad)")
     hist_df = fetch_historical_aqi_data(fs, num_days=7)
     if not hist_df.empty:
         chart = alt.Chart(hist_df).mark_area(
@@ -114,7 +117,7 @@ try:
         ).properties(height=300).interactive()
         st.altair_chart(chart, use_container_width=True)
 
-    # 4. Forecast Section with ALERTS
+    # 4. Forecast Section
     st.markdown("---")
     st.subheader("📅 Smart Forecast & Health Alerts")
     f_cols = st.columns(3)
@@ -128,23 +131,19 @@ try:
     }
 
     for i, row in future_df.iterrows():
-        # Feature DataFrame construction
+        # Feature DataFrame with PKT aware time
         feat = pd.DataFrame([{
             'temperature': row['temperature'], 'humidity': row['humidity'], 'wind_speed': row['wind_speed'],
-            'hour': 12.0, 'weekday': float(row['datetime'].weekday()), 'month': float(row['datetime'].month),
-            'aqi_lag_1': current_aqi_lag, 'pm2_5_rolling_6h': last_pm25, 'wind_stagnant': 1.0 if row['wind_speed'] < 2.0 else 0.0
+            'hour': float(row['datetime'].hour), 
+            'weekday': float(row['datetime'].weekday()), 'month': float(row['datetime'].month),
+            'aqi_lag_1': current_aqi_lag, 'pm2_5_rolling_6h': last_pm25, 
+            'wind_stagnant': 1.0 if row['wind_speed'] < 2.0 else 0.0
         }])
         
         pred = model.predict(feat)[0]
         aqi_val = int(np.clip(round(pred), 1, 5))
         current_aqi_lag = pred
         label, color, icon = status_map.get(aqi_val)
-
-        # 🚨 TRIGGER ALERTS
-        if aqi_val >= 4:
-            st.toast(f"Health Risk: {label} quality on {row['datetime'].strftime('%A')}", icon="😷")
-            if i == 0: 
-                st.error(f"🚨 **HAZARDOUS:** Level {aqi_val} AQI predicted. Sensitive groups must stay indoors.")
 
         with f_cols[i]:
             st.markdown(f"""
@@ -157,27 +156,18 @@ try:
                 </div>
             """, unsafe_allow_html=True)
 
-    # Sidebar: Analytics & Versioning
+    # Sidebar: Analytics
     with st.sidebar:
         st.title("🔬 Analytics")
-        # FORCED LATEST VERSION DISPLAY
-        st.success(f"📌 Active Model: **Version {best_meta.version}**")
+        st.success(f"📌 Model: **Version {best_meta.version}**")
         st.metric("Training R² Accuracy", f"{best_meta.training_metrics.get('r2', 0):.4f}")
         
-        # FEATURE IMPORTANCE (SHAP LITE)
         if hasattr(model, 'feature_importances_'):
             st.write("---")
             st.subheader("💡 Prediction Drivers")
             feats = ['Temp', 'Humid', 'Wind', 'Hour', 'Weekday', 'Month', 'Lag AQI', 'PM2.5', 'Stagnant']
-            # Creating a simple series for bar chart visualization
             imp_series = pd.Series(model.feature_importances_, index=feats).sort_values(ascending=False).head(5)
             st.bar_chart(imp_series)
-
-        if all_models:
-            st.write("---")
-            st.write("📊 **Algorithm Benchmark**")
-            comp_df = pd.DataFrame([{"Model": m.name.split('_')[-1].upper(), "Ver": m.version, "R2": m.training_metrics.get('r2', 0)} for m in all_models])
-            st.dataframe(comp_df, hide_index=True)
 
 except Exception as e:
     st.error(f"System Error: {e}")

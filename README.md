@@ -51,5 +51,7 @@ HOPSWORKS_KEY=your_api_key_here
 Run the Dashboard:
 streamlit run data_pipeline/app.py
 
+https://10pearlsproject-gemz779vmyy3mfehk6yd3w.streamlit.app/
+
 👥 Contributor
 Hajira Imran

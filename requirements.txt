@@ -9,3 +9,4 @@ requests==2.31.0
 xgboost==2.0.3
 meteostat==1.6.7
 altair==5.1.2
+pytz==2025.2
