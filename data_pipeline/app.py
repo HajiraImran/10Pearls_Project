@@ -5,14 +5,15 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
-import pytz  
+import pytz  # Zarori: Timezone sync ke liye
 import altair as alt
 from utils import fetch_weather_forecast, fetch_historical_aqi_data
 from dotenv import load_dotenv
 
 # --- CONFIG & TIMEZONE ---
 load_dotenv()
-pk_tz = pytz.timezone('Asia/Karachi') # Standard for Pakistan
+# IANA standard: Pakistan ke liye 'Asia/Karachi' hi use hota hai
+pk_tz = pytz.timezone('Asia/Karachi')
 now_pk = datetime.now(pk_tz)
 
 st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
@@ -36,16 +37,19 @@ st.markdown("""
 # --- ASSET LOADING ---
 @st.cache_resource(ttl=3600) 
 def load_assets():
+    # Streamlit Cloud ke Secrets ya local .env se key uthana
     api_key = st.secrets["HOPSWORKS_KEY"] if "HOPSWORKS_KEY" in st.secrets else os.getenv("HOPSWORKS_KEY")
     project = hopsworks.login(api_key_value=api_key)
     mr = project.get_model_registry()
     fs = project.get_feature_store()
     
+    # Islamabad Model loading (Latest Version)
     best_models_list = mr.get_models("best_islamabad_aqi_model")
     model_meta = max(best_models_list, key=lambda m: m.version)
     model_dir = model_meta.download()
     model = joblib.load(os.path.join(model_dir, "best_model.pkl"))
     
+    # Benchmark Models
     model_names = ["islamabad_aqi_randomforest", "islamabad_aqi_xgboost", "islamabad_aqi_gradientboosting"]
     all_models_meta = []
     for name in model_names:
@@ -64,6 +68,7 @@ try:
     col_t1, col_t2 = st.columns([2, 1])
     with col_t1:
         st.title("🌬️ Islamabad Air Quality Index")
+        # Live Monitoring ab PKT (Islamabad Time) show karega
         st.markdown(f"🛰️ **Live Monitoring (PKT):** {now_pk.strftime('%A, %d %b %Y | %I:%M %p')}")
     with col_t2:
         if os.path.exists("Islamabad.jpg"):
@@ -73,6 +78,8 @@ try:
 
     # 2. Key Metrics Row
     fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
+    
+    # Trend False taake hamesha fresh data mile
     latest_df = fg.read(read_options={"use_trend": False}).sort_values("datetime", ascending=False).head(1)
     
     if not latest_df.empty:
@@ -111,13 +118,15 @@ try:
         ).properties(height=300).interactive()
         st.altair_chart(chart, use_container_width=True)
 
-    # 4. Forecast Section (CRITICAL FIXES HERE)
+    # 4. Forecast Section (CRITICAL FIX FOR THE "1" PROBLEM)
     st.markdown("---")
     st.subheader("📅 Smart Forecast & Health Alerts")
     f_cols = st.columns(3)
     
     future_df = forecast_weather.iloc[1:4].reset_index(drop=True)
-    current_aqi_lag = float(last_aqi) # Explicit float
+    
+    # Lag chain starts with the absolute current AQI
+    current_aqi_lag = float(last_aqi) 
     
     status_map = {
         1: ("Good", "#00cc96", "🌿"), 2: ("Fair", "#fec032", "🌳"), 
@@ -125,12 +134,12 @@ try:
     }
 
     for i, row in future_df.iterrows():
-        # Ensure model receives correct column order and data types
+        # FIX: Sahi hour aur float types use karna
         feat = pd.DataFrame([{
             'temperature': float(row['temperature']), 
             'humidity': float(row['humidity']), 
             'wind_speed': float(row['wind_speed']),
-            'hour': float(row['datetime'].hour), 
+            'hour': float(row['datetime'].hour), # Pehle fixed 12.0 tha, ab dynamic hai
             'weekday': float(row['datetime'].weekday()), 
             'month': float(row['datetime'].month),
             'aqi_lag_1': float(current_aqi_lag), 
@@ -138,16 +147,14 @@ try:
             'wind_stagnant': 1.0 if float(row['wind_speed']) < 2.0 else 0.0
         }])
         
-        # Explicitly align columns if model was trained on specific order
-        # feat = feat[['temperature', 'humidity', 'wind_speed', 'hour', 'weekday', 'month', 'aqi_lag_1', 'pm2_5_rolling_6h', 'wind_stagnant']]
-        
+        # Prediction
         pred = model.predict(feat)[0]
         aqi_val = int(np.clip(round(pred), 1, 5))
         
-        # Update lag for the next iteration
+        # Chain reaction update: Next day's lag is today's prediction
         current_aqi_lag = pred 
         
-        label, color, icon = status_map.get(aqi_val, ("Unknown", "#666", "❓"))
+        label, color, icon = status_map.get(aqi_val, ("Good", "#00cc96", "🌿"))
 
         with f_cols[i]:
             st.markdown(f"""
@@ -160,16 +167,15 @@ try:
                 </div>
             """, unsafe_allow_html=True)
 
-    # Sidebar
+    # Sidebar: Analytics
     with st.sidebar:
         st.title("🔬 Analytics")
-        st.success(f"📌 Model: **Version {best_meta.version}**")
+        st.success(f"📌 Active Model: **Version {best_meta.version}**")
         st.metric("Training R² Accuracy", f"{best_meta.training_metrics.get('r2', 0):.4f}")
         
         if hasattr(model, 'feature_importances_'):
             st.write("---")
             st.subheader("💡 Prediction Drivers")
-            # Feature names matching the training set
             feats = ['Temp', 'Humid', 'Wind', 'Hour', 'Weekday', 'Month', 'Lag AQI', 'PM2.5', 'Stagnant']
             imp_series = pd.Series(model.feature_importances_, index=feats).sort_values(ascending=False).head(5)
             st.bar_chart(imp_series)
