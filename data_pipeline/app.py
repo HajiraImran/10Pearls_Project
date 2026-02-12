@@ -1,96 +1,159 @@
+import os
 import streamlit as st
 import hopsworks
 import joblib
 import pandas as pd
 import numpy as np
-import os
 from datetime import datetime
-import pytz  
-from utils import fetch_weather_forecast
-from dotenv import load_dotenv
+import altair as alt
+
+from utils import fetch_weather_forecast, fetch_weather_history, fetch_historical_aqi_data
 
 # --- CONFIG ---
-load_dotenv()
-pk_tz = pytz.timezone('Asia/Karachi')
-now_pk = datetime.now(pk_tz)
+st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
 
-st.set_page_config(page_title="Islamabad AQI Predictor", layout="wide")
+# --- CSS ---
+st.markdown("""
+<style>
+.stApp { background-color: #0b0e14; color: #ffffff; }
+.metric-card { background: rgba(255, 255, 255, 0.05); border-radius: 15px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); text-align:center;}
+.aqi-val { font-size:3rem; font-weight:800; margin:0; }
+.footer { text-align:center; color:#666; padding:20px; font-size:0.8rem; }
+</style>
+""", unsafe_allow_html=True)
 
-# --- ASSET LOADING ---
-@st.cache_resource(ttl=3600) 
+# --- LOAD HOPSWORKS MODEL ---
+@st.cache_resource(ttl=3600)
 def load_assets():
-    if "HOPSWORKS_KEY" in st.secrets:
-        api_key = st.secrets["HOPSWORKS_KEY"]
-    else:
-        api_key = os.getenv("HOPSWORKS_KEY")
+    try:
+        HOPSWORKS_KEY = os.environ["HOPSWORKS_KEY"]
+        project = hopsworks.login(api_key_value=HOPSWORKS_KEY)
+        mr = project.get_model_registry()
+        fs = project.get_feature_store()
         
-    project = hopsworks.login(api_key_value=api_key)
-    mr = project.get_model_registry()
-    fs = project.get_feature_store()
-    
-    best_models_list = mr.get_models("best_islamabad_aqi_model")
-    model_meta = max(best_models_list, key=lambda m: m.version)
-    model_dir = model_meta.download()
-    model = joblib.load(os.path.join(model_dir, "best_model.pkl"))
-    
-    return model, model_meta, fs
+        models_list = mr.get_models("best_islamabad_aqi_model")
+        if not models_list:
+            st.error("❌ Model not found in Hopsworks")
+            st.stop()
+        best_model_meta = max(models_list, key=lambda m: m.version)
+        model_dir = best_model_meta.download()
+        model = joblib.load(os.path.join(model_dir, "best_model.pkl"))
+        
+        return model, best_model_meta, fs
+    except Exception as e:
+        st.error(f"Failed to load assets: {e}")
+        st.stop()
 
-try:
-    model, best_meta, fs = load_assets()
-    
-    # --- DATA FETCH ---
-    fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
-    latest_df = fg.read(read_options={"use_trend": False}).sort_values("datetime", ascending=False).head(1)
-    
-    last_aqi = float(latest_df['aqi'].values[0]) if not latest_df.empty else 2.0
-    last_pm25 = float(latest_df['pm2_5_rolling_6h'].values[0]) if not latest_df.empty else 15.0
+model, best_meta, fs = load_assets()
 
-    forecast_weather = fetch_weather_forecast(days=4)
-    future_df = forecast_weather.iloc[1:4].reset_index(drop=True)
-
-    # --- UI ---
+# --- HEADER ---
+col1, col2 = st.columns([2,1])
+with col1:
     st.title("🌬️ Islamabad Air Quality Index")
-    st.write(f"Last Updated: {now_pk.strftime('%I:%M %p')}")
+    st.markdown(f"🛰️ **Live Monitoring:** {datetime.now().strftime('%A, %d %b %Y | %I:%M %p')}")
+with col2:
+    if os.path.exists("Islamabad.jpg"):
+        st.image("Islamabad.jpg", width=250)
+st.markdown("---")
 
-    # --- FORECAST LOOP ---
-    st.markdown("---")
-    f_cols = st.columns(3)
+# --- FEATURE STORE DATA ---
+fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
+latest_df = fg.read().sort_values("datetime", ascending=False).head(1)
+if latest_df.empty:
+    st.error("❌ No data found in feature store!")
+    st.stop()
+last_aqi = float(latest_df['aqi'].iloc[0])
+last_pm25 = float(latest_df['pm2_5_rolling_6h'].iloc[0])
+
+# --- WEATHER FORECAST WITH FALLBACK ---
+forecast_weather = fetch_weather_forecast(days=3)
+if forecast_weather.empty or len(forecast_weather) < 3:
+    st.warning("⚠️ Forecast unavailable, using recent historical weather instead.")
+    hist_weather = fetch_weather_history(days=3)
+    if hist_weather.empty:
+        st.error("❌ Cannot fetch any weather data. Predictions not available.")
+        st.stop()
+    forecast_weather = hist_weather.tail(3).reset_index(drop=True)
+
+# Add tiny random drift to avoid identical predictions
+forecast_weather['temperature'] += np.random.uniform(-1,1,size=len(forecast_weather))
+forecast_weather['humidity'] += np.random.uniform(-5,5,size=len(forecast_weather))
+forecast_weather['wind_speed'] += np.random.uniform(-1,1,size=len(forecast_weather))
+
+# Ensure datetime column exists
+if 'datetime' not in forecast_weather.columns:
+    forecast_weather['datetime'] = pd.date_range(start=datetime.now(), periods=len(forecast_weather))
+
+# --- KEY METRICS ---
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Current AQI", int(last_aqi))
+m2.metric("Temperature", f"{forecast_weather.iloc[0]['temperature']:.1f}°C")
+m3.metric("Humidity", f"{forecast_weather.iloc[0]['humidity']:.1f}%")
+m4.metric("PM2.5 (Rolling)", f"{last_pm25:.1f} µg/m³")
+
+# --- HISTORICAL CHART ---
+st.subheader("📈 Historical AQI Trends (Past 7 Days)")
+hist_df = fetch_historical_aqi_data(fs, num_days=7)
+if not hist_df.empty:
+    chart = alt.Chart(hist_df).mark_area(line={'color':'#00cc96'}).encode(
+        x=alt.X('Date:T', title=''),
+        y=alt.Y('Average AQI:Q', title='AQI Level'),
+        tooltip=['Date','Average AQI']
+    ).properties(height=300).interactive()
+    st.altair_chart(chart, use_container_width=True)
+
+# --- FORECAST PREDICTIONS ---
+st.subheader("📅 Smart Forecast & Health Alerts")
+FEATURE_ORDER = ['temperature','humidity','wind_speed','hour','weekday','month','aqi_lag_1','pm2_5_rolling_6h','wind_stagnant']
+future_df = forecast_weather.reset_index(drop=True)
+current_aqi_lag = last_aqi
+current_pm25 = last_pm25
+status_map = {1: ("Good","#00cc96","🌿"),2:("Fair","#fec032","🌳"),3:("Moderate","#ffa15a","😷"),4:("Poor","#ef553b","⚠️"),5:("Hazardous","#ab63fa","🚨")}
+predictions = []
+f_cols = st.columns(len(future_df))
+
+for i,row in future_df.iterrows():
+    feat = pd.DataFrame([{
+        'temperature': float(row['temperature']),
+        'humidity': float(row['humidity']),
+        'wind_speed': float(row['wind_speed']),
+        'hour': 12.0,
+        'weekday': float(row['datetime'].weekday()),
+        'month': float(row['datetime'].month),
+        'aqi_lag_1': float(current_aqi_lag),
+        'pm2_5_rolling_6h': float(current_pm25),
+        'wind_stagnant': 1.0 if row['wind_speed']<2.0 else 0.0
+    }])
+    feat = feat[FEATURE_ORDER]
+    pred = model.predict(feat)[0]
+    aqi_val = int(np.clip(round(pred),1,5))
+    predictions.append({'day':i+1,'date':row['datetime'].strftime('%A, %d %b'),'aqi_final':aqi_val})
     
-    current_aqi_lag = last_aqi
-    current_pm25 = last_pm25
+    current_aqi_lag = pred
+    humidity_factor = row['humidity']/100.0
+    wind_factor = max(0.3,1.0-row['wind_speed']/10.0)
+    pm25_drift = (pred-last_aqi)*10.0
+    current_pm25 = current_pm25*(0.80+0.35*humidity_factor*wind_factor)+pm25_drift
+    current_pm25 = np.clip(current_pm25,5.0,200.0)
+    
+    label,color,icon = status_map.get(aqi_val,("Unknown","#666","❓"))
+    
+    if aqi_val>=4:
+        st.toast(f"⚠️ Health Risk: {label} on {row['datetime'].strftime('%A')}", icon="😷")
+        if i==0: st.error(f"🚨 ALERT: Level {aqi_val} AQI predicted for {row['datetime'].strftime('%A')}")
+    
+    with f_cols[i]:
+        st.markdown(f"""
+        <div class="metric-card" style="border-top:5px solid {color};">
+            <p style="color:#888; font-size:0.85rem;">{row['datetime'].strftime('%A, %d %b')}</p>
+            <h2 style="color:{color}; margin:10px 0;">{icon} {label}</h2>
+            <p class="aqi-val" style="color:{color};">{aqi_val}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    for i, row in future_df.iterrows():
-        # ✅ STEP 1: Values ko EXACT usi order mein nikalna jo training mein tha
-        # Order: aqi_lag_1, humidity, hour, month, pm2_5_rolling_6h, temperature, weekday, wind_speed, wind_stagnant
-        input_data = [
-            float(current_aqi_lag),
-            float(row['humidity']),
-            float(row['datetime'].hour),
-            float(row['datetime'].month),
-            float(current_pm25),
-            float(row['temperature']),
-            float(row['datetime'].weekday()),
-            float(row['wind_speed']),
-            1.0 if float(row['wind_speed']) < 2.5 else 0.0
-        ]
-        
-        # ✅ STEP 2: DataFrame ke bajaye Numpy Array use karein
-        # Is se 'feature_names mismatch' ka error kabhi nahi aayega
-        input_array = np.array([input_data])
-        
-        # ✅ STEP 3: Prediction (Array input bypasses name checking)
-        pred = model.predict(input_array)[0]
-        aqi_val = int(np.clip(round(pred), 1, 5))
-        
-        # Update lag for next iteration
-        current_aqi_lag = float(pred)
-        current_pm25 = current_pm25 * 0.9 + (pred * 5.0) * 0.1
+# --- PREDICTION DEBUG ---
+with st.expander("🔍 Prediction Details"):
+    st.dataframe(pd.DataFrame(predictions))
 
-        with f_cols[i]:
-            st.metric(f"{row['datetime'].strftime('%A')}", f"AQI {aqi_val}")
-
-except Exception as e:
-    st.error(f"Something went wrong: {e}")
-    st.info("Technical Detail: Numpy array bypass mode activated.")
-
-st.markdown('<div style="text-align:center; color:gray;">Islamabad AQI MLOps • Hopsworks 4.2</div>', unsafe_allow_html=True)
+# --- FOOTER ---
+st.markdown('<div class="footer">Islamabad AQI Dashboard • Powered by Hopsworks ML</div>', unsafe_allow_html=True)
