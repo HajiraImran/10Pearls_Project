@@ -4,11 +4,12 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 from meteostat import Point, Hourly
 from dotenv import load_dotenv
+import numpy as np
 
 load_dotenv()
 
 def fetch_weather_history(days=120):
-    """Historical weather data from Meteostat (works fine)"""
+    """Fetch historical weather data from Meteostat"""
     lat, lon = 33.72, 73.04
     location = Point(lat, lon)
     now_time = datetime.now() 
@@ -39,13 +40,13 @@ def fetch_weather_history(days=120):
 
 def fetch_weather_forecast(days=4):
     """
-    FIXED: Uses Open-Meteo API for actual weather forecasts
-    Free, no API key needed, reliable on Streamlit Cloud
+    Fetch weather forecast using Open-Meteo API (free, reliable)
+    Falls back to realistic estimates if API fails
     """
     lat, lon = 33.72, 73.04
     
     try:
-        # Open-Meteo Forecast API (free & reliable)
+        # Open-Meteo Forecast API
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
@@ -68,18 +69,19 @@ def fetch_weather_forecast(days=4):
             'wind_speed': hourly['wind_speed_10m']
         })
         
-        # Daily averages (around noon for each day)
+        # Aggregate to daily (around noon for each day)
         df['date'] = df['datetime'].dt.date
         daily_forecast = df.groupby('date').agg({
-            'datetime': 'first',  # Keep first datetime for each day
+            'datetime': 'first',
             'temperature': 'mean',
             'humidity': 'mean',
             'wind_speed': 'mean'
         }).reset_index(drop=True)
         
-        # Ensure proper datetime column
+        # Ensure datetime column
         daily_forecast['datetime'] = pd.to_datetime(daily_forecast['datetime'])
         
+        print(f"✅ Weather forecast fetched: {len(daily_forecast)} days")
         return daily_forecast.head(days)
         
     except requests.exceptions.RequestException as e:
@@ -92,21 +94,19 @@ def fetch_weather_forecast(days=4):
 
 def _generate_fallback_forecast(days=4):
     """
-    Fallback: Generate realistic weather estimates for Islamabad
-    Based on seasonal averages
+    Generate realistic weather estimates for Islamabad
+    Based on seasonal patterns
     """
-    import numpy as np
-    
     current_month = datetime.now().month
     
-    # Islamabad seasonal patterns
+    # Islamabad seasonal temperature patterns
     season_temps = {
-        1: 12, 2: 14, 3: 19, 4: 25, 5: 31, 6: 35,  # Winter to Summer
-        7: 33, 8: 31, 9: 29, 10: 24, 11: 18, 12: 13  # Summer to Winter
+        1: 12, 2: 14, 3: 19, 4: 25, 5: 31, 6: 35,
+        7: 33, 8: 31, 9: 29, 10: 24, 11: 18, 12: 13
     }
     
     base_temp = season_temps.get(current_month, 25)
-    base_humidity = 65 if current_month in [7, 8, 9] else 50  # Monsoon season
+    base_humidity = 65 if current_month in [7, 8, 9] else 50  # Monsoon
     
     dates = [datetime.now() + timedelta(days=i) for i in range(days)]
     
@@ -119,11 +119,12 @@ def _generate_fallback_forecast(days=4):
             'wind_speed': np.random.uniform(3, 8)
         })
     
+    print(f"⚠️ Using fallback forecast: {len(forecast_data)} days")
     return pd.DataFrame(forecast_data)
 
 
 def fetch_raw_pollution(days=120):
-    """Fetch historical pollution data from OpenWeather"""
+    """Fetch historical pollution data from OpenWeather API"""
     API_KEY = os.getenv("OPENWEATHER_KEY")
     if not API_KEY:
         print("⚠️ OPENWEATHER_KEY not found in environment")
@@ -168,7 +169,7 @@ def fetch_raw_pollution(days=120):
 
 
 def clean_and_merge(pol_df, wea_df):
-    """Merge pollution and weather data"""
+    """Merge pollution and weather data on datetime"""
     if pol_df.empty or wea_df.empty: 
         return pd.DataFrame()
     
@@ -180,7 +181,7 @@ def clean_and_merge(pol_df, wea_df):
 
 
 def apply_feature_engineering(df):
-    """Apply time-based and rolling features"""
+    """Apply time-based features and rolling statistics"""
     if df.empty: 
         return df
     
@@ -200,7 +201,7 @@ def apply_feature_engineering(df):
             window=6, min_periods=1
         ).mean()
     
-    # Wind stagnation
+    # Wind stagnation indicator
     if 'wind_speed' in df.columns:
         df['wind_stagnant'] = (df['wind_speed'] < 2.0).astype(float)
     
@@ -213,8 +214,8 @@ def apply_feature_engineering(df):
 
 def fetch_historical_aqi_data(fs, num_days=7):
     """
-    Fetch last 7 days of AQI data from Hopsworks Feature Store
-    Returns daily averages for dashboard visualization
+    Fetch historical AQI data from Hopsworks Feature Store
+    Returns daily averages for visualization
     """
     try:
         # Connect to Feature Group
@@ -223,11 +224,15 @@ def fetch_historical_aqi_data(fs, num_days=7):
         # Read all data
         query_df = fg.read()
         
+        if query_df.empty:
+            print("⚠️ Feature group is empty")
+            return pd.DataFrame(columns=['Date', 'Average AQI'])
+        
         # Filter for last N days
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=num_days)
         
-        # Ensure datetime column is properly formatted
+        # Ensure datetime column
         query_df['datetime'] = pd.to_datetime(query_df['datetime'])
         if query_df['datetime'].dt.tz is None:
             query_df['datetime'] = query_df['datetime'].dt.tz_localize('UTC')
@@ -236,7 +241,7 @@ def fetch_historical_aqi_data(fs, num_days=7):
         historical_df = query_df[query_df['datetime'] >= start_date].copy()
         
         if historical_df.empty:
-            print("⚠️ No historical data found in date range")
+            print(f"⚠️ No data in last {num_days} days")
             return pd.DataFrame(columns=['Date', 'Average AQI'])
         
         # Calculate daily averages
@@ -247,9 +252,10 @@ def fetch_historical_aqi_data(fs, num_days=7):
             'aqi': 'Average AQI'
         }, inplace=True)
         
-        # Convert Date to datetime for Altair
+        # Convert to datetime for Altair
         daily_avg['Date'] = pd.to_datetime(daily_avg['Date'])
         
+        print(f"✅ Fetched {len(daily_avg)} days of historical data")
         return daily_avg.sort_values('Date')
         
     except Exception as e:
