@@ -1,17 +1,18 @@
+import os
 import streamlit as st
 import hopsworks
 import joblib
 import pandas as pd
 import numpy as np
-import os
 from datetime import datetime
 import altair as alt
-from utils import fetch_weather_forecast, fetch_historical_aqi_data
+
+from utils import fetch_weather_forecast, fetch_historical_aqi_data  # Ensure utils.py is in same folder
 
 # --- CONFIG ---
 st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
 
-# --- CSS STYLING ---
+# --- CSS ---
 st.markdown("""
 <style>
 .stApp { background-color: #0b0e14; color: #ffffff; }
@@ -21,11 +22,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- LOAD HOPSWORKS ASSETS ---
+# --- LOAD HOPSWORKS MODEL ---
 @st.cache_resource(ttl=3600)
 def load_assets():
     try:
-        HOPSWORKS_KEY = os.environ["HOPSWORKS_KEY"]  # Set in Streamlit Secrets
+        HOPSWORKS_KEY = os.environ["HOPSWORKS_KEY"]  # Streamlit Secrets
         project = hopsworks.login(api_key_value=HOPSWORKS_KEY)
         mr = project.get_model_registry()
         fs = project.get_feature_store()
