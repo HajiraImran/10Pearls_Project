@@ -40,13 +40,45 @@ def fetch_weather_history(days=120):
 
 def fetch_weather_forecast(days=4):
     """
-    Fetch weather forecast using Open-Meteo API (free, reliable)
-    Falls back to realistic estimates if API fails
+    Fetch weather forecast with multiple API fallbacks
+    Priority: WeatherAPI.com → Open-Meteo → Deterministic Fallback
     """
     lat, lon = 33.72, 73.04
     
+    # ATTEMPT 1: WeatherAPI.com (most reliable)
+    weather_key = os.getenv("WEATHER_API_KEY")
+    if weather_key:
+        try:
+            url = "http://api.weatherapi.com/v1/forecast.json"
+            params = {
+                "key": weather_key,
+                "q": f"{lat},{lon}",
+                "days": days,
+                "aqi": "no"
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            forecast_data = []
+            for day in data['forecast']['forecastday']:
+                forecast_data.append({
+                    'datetime': pd.to_datetime(day['date']),
+                    'temperature': float(day['day']['avgtemp_c']),
+                    'humidity': float(day['day']['avghumidity']),
+                    'wind_speed': float(day['day']['maxwind_kph'])
+                })
+            
+            df = pd.DataFrame(forecast_data)
+            print(f"✅ WeatherAPI.com: {len(df)} days fetched")
+            return df.head(days)
+            
+        except Exception as e:
+            print(f"⚠️ WeatherAPI.com failed: {e}")
+    
+    # ATTEMPT 2: Open-Meteo (free, no key needed)
     try:
-        # Open-Meteo Forecast API
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
@@ -60,7 +92,6 @@ def fetch_weather_forecast(days=4):
         response.raise_for_status()
         data = response.json()
         
-        # Parse hourly data
         hourly = data['hourly']
         df = pd.DataFrame({
             'datetime': pd.to_datetime(hourly['time']),
@@ -69,7 +100,7 @@ def fetch_weather_forecast(days=4):
             'wind_speed': hourly['wind_speed_10m']
         })
         
-        # Aggregate to daily (around noon for each day)
+        # Aggregate to daily
         df['date'] = df['datetime'].dt.date
         daily_forecast = df.groupby('date').agg({
             'datetime': 'first',
@@ -78,48 +109,56 @@ def fetch_weather_forecast(days=4):
             'wind_speed': 'mean'
         }).reset_index(drop=True)
         
-        # Ensure datetime column
         daily_forecast['datetime'] = pd.to_datetime(daily_forecast['datetime'])
-        
-        print(f"✅ Weather forecast fetched: {len(daily_forecast)} days")
+        print(f"✅ Open-Meteo: {len(daily_forecast)} days fetched")
         return daily_forecast.head(days)
         
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️ Weather API error: {e}")
-        return _generate_fallback_forecast(days)
     except Exception as e:
-        print(f"⚠️ Forecast processing error: {e}")
-        return _generate_fallback_forecast(days)
+        print(f"⚠️ Open-Meteo failed: {e}")
+    
+    # ATTEMPT 3: Deterministic fallback
+    print(f"⚠️ All APIs failed - using deterministic fallback")
+    return _generate_fallback_forecast(days)
 
 
 def _generate_fallback_forecast(days=4):
     """
-    Generate realistic weather estimates for Islamabad
-    Based on seasonal patterns
+    Generate deterministic (non-random) weather forecast
+    Based on Islamabad seasonal patterns
     """
     current_month = datetime.now().month
+    current_day = datetime.now().day
     
-    # Islamabad seasonal temperature patterns
-    season_temps = {
-        1: 12, 2: 14, 3: 19, 4: 25, 5: 31, 6: 35,
-        7: 33, 8: 31, 9: 29, 10: 24, 11: 18, 12: 13
-    }
+    # Islamabad February typical weather
+    # Mid-winter transitioning to spring
+    base_temp = 15.0  # °C
+    base_humidity = 55.0  # %
+    base_wind = 5.5  # km/h
     
-    base_temp = season_temps.get(current_month, 25)
-    base_humidity = 65 if current_month in [7, 8, 9] else 50  # Monsoon
+    # Apply seasonal adjustments
+    if current_month == 2:  # February
+        base_temp = 14.0 + (current_day / 28.0) * 5.0  # Warming through month
+        base_humidity = 60.0 - (current_day / 28.0) * 10.0  # Drying
+    elif current_month == 3:  # March
+        base_temp = 20.0
+        base_humidity = 50.0
     
     dates = [datetime.now() + timedelta(days=i) for i in range(days)]
     
     forecast_data = []
     for i, date in enumerate(dates):
+        # Progressive changes (not random)
+        temp_trend = i * 0.4  # Slight daily warming
+        humidity_trend = -i * 1.5  # Decreasing humidity
+        wind_variation = 0.7 * ((-1) ** i)  # Alternating pattern
+        
         forecast_data.append({
             'datetime': date,
-            'temperature': base_temp + np.random.uniform(-3, 3),
-            'humidity': base_humidity + np.random.uniform(-10, 10),
-            'wind_speed': np.random.uniform(3, 8)
+            'temperature': base_temp + temp_trend,
+            'humidity': max(35.0, min(80.0, base_humidity + humidity_trend)),
+            'wind_speed': max(2.0, base_wind + wind_variation)
         })
     
-    print(f"⚠️ Using fallback forecast: {len(forecast_data)} days")
     return pd.DataFrame(forecast_data)
 
 
@@ -127,7 +166,7 @@ def fetch_raw_pollution(days=120):
     """Fetch historical pollution data from OpenWeather API"""
     API_KEY = os.getenv("OPENWEATHER_KEY")
     if not API_KEY:
-        print("⚠️ OPENWEATHER_KEY not found in environment")
+        print("⚠️ OPENWEATHER_KEY not found")
         return pd.DataFrame()
     
     url = "https://api.openweathermap.org/data/2.5/air_pollution/history"
@@ -201,7 +240,7 @@ def apply_feature_engineering(df):
             window=6, min_periods=1
         ).mean()
     
-    # Wind stagnation indicator
+    # Wind stagnation
     if 'wind_speed' in df.columns:
         df['wind_stagnant'] = (df['wind_speed'] < 2.0).astype(float)
     
@@ -218,10 +257,7 @@ def fetch_historical_aqi_data(fs, num_days=7):
     Returns daily averages for visualization
     """
     try:
-        # Connect to Feature Group
         fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
-        
-        # Read all data
         query_df = fg.read()
         
         if query_df.empty:
@@ -232,12 +268,10 @@ def fetch_historical_aqi_data(fs, num_days=7):
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=num_days)
         
-        # Ensure datetime column
         query_df['datetime'] = pd.to_datetime(query_df['datetime'])
         if query_df['datetime'].dt.tz is None:
             query_df['datetime'] = query_df['datetime'].dt.tz_localize('UTC')
         
-        # Filter date range
         historical_df = query_df[query_df['datetime'] >= start_date].copy()
         
         if historical_df.empty:
@@ -252,10 +286,9 @@ def fetch_historical_aqi_data(fs, num_days=7):
             'aqi': 'Average AQI'
         }, inplace=True)
         
-        # Convert to datetime for Altair
         daily_avg['Date'] = pd.to_datetime(daily_avg['Date'])
         
-        print(f"✅ Fetched {len(daily_avg)} days of historical data")
+        print(f"✅ Historical data: {len(daily_avg)} days")
         return daily_avg.sort_values('Date')
         
     except Exception as e:
