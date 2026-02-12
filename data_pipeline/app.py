@@ -4,10 +4,10 @@ import hopsworks
 import joblib
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import altair as alt
 
-from utils import fetch_weather_forecast, fetch_weather_history, fetch_historical_aqi_data
+from utils import fetch_weather_forecast, fetch_historical_aqi_data  # Ensure utils.py is in same folder
 
 # --- CONFIG ---
 st.set_page_config(page_title="Islamabad Air Quality Insight", layout="wide", page_icon="🌬️")
@@ -26,7 +26,7 @@ st.markdown("""
 @st.cache_resource(ttl=3600)
 def load_assets():
     try:
-        HOPSWORKS_KEY = os.environ["HOPSWORKS_KEY"]
+        HOPSWORKS_KEY = os.environ["HOPSWORKS_KEY"]  # Streamlit Secrets
         project = hopsworks.login(api_key_value=HOPSWORKS_KEY)
         mr = project.get_model_registry()
         fs = project.get_feature_store()
@@ -65,24 +65,11 @@ if latest_df.empty:
 last_aqi = float(latest_df['aqi'].iloc[0])
 last_pm25 = float(latest_df['pm2_5_rolling_6h'].iloc[0])
 
-# --- WEATHER FORECAST WITH FALLBACK ---
-forecast_weather = fetch_weather_forecast(days=3)
-if forecast_weather.empty or len(forecast_weather) < 3:
-    st.warning("⚠️ Forecast unavailable, using recent historical weather instead.")
-    hist_weather = fetch_weather_history(days=3)
-    if hist_weather.empty:
-        st.error("❌ Cannot fetch any weather data. Predictions not available.")
-        st.stop()
-    forecast_weather = hist_weather.tail(3).reset_index(drop=True)
-
-# Add tiny random drift to avoid identical predictions
-forecast_weather['temperature'] += np.random.uniform(-1,1,size=len(forecast_weather))
-forecast_weather['humidity'] += np.random.uniform(-5,5,size=len(forecast_weather))
-forecast_weather['wind_speed'] += np.random.uniform(-1,1,size=len(forecast_weather))
-
-# Ensure datetime column exists
-if 'datetime' not in forecast_weather.columns:
-    forecast_weather['datetime'] = pd.date_range(start=datetime.now(), periods=len(forecast_weather))
+# --- WEATHER FORECAST ---
+forecast_weather = fetch_weather_forecast(days=4)
+if forecast_weather.empty or len(forecast_weather)<4:
+    st.error("❌ Weather forecast data insufficient for predictions.")
+    st.stop()
 
 # --- KEY METRICS ---
 m1, m2, m3, m4 = st.columns(4)
@@ -98,60 +85,85 @@ if not hist_df.empty:
     chart = alt.Chart(hist_df).mark_area(line={'color':'#00cc96'}).encode(
         x=alt.X('Date:T', title=''),
         y=alt.Y('Average AQI:Q', title='AQI Level'),
-        tooltip=['Date','Average AQI']
+        tooltip=['Date', 'Average AQI']
     ).properties(height=300).interactive()
     st.altair_chart(chart, use_container_width=True)
 
-# --- FORECAST PREDICTIONS ---
+# --- FORECAST PREDICTIONS (Cloud-compatible) ---
 st.subheader("📅 Smart Forecast & Health Alerts")
-FEATURE_ORDER = ['temperature','humidity','wind_speed','hour','weekday','month','aqi_lag_1','pm2_5_rolling_6h','wind_stagnant']
-future_df = forecast_weather.reset_index(drop=True)
+
+FEATURE_ORDER = ['temperature','humidity','wind_speed','hour','weekday','month',
+                 'aqi_lag_1','pm2_5_rolling_6h','wind_stagnant']
+
+future_df = forecast_weather.iloc[1:4].reset_index(drop=True)
 current_aqi_lag = last_aqi
 current_pm25 = last_pm25
-status_map = {1: ("Good","#00cc96","🌿"),2:("Fair","#fec032","🌳"),3:("Moderate","#ffa15a","😷"),4:("Poor","#ef553b","⚠️"),5:("Hazardous","#ab63fa","🚨")}
-predictions = []
-f_cols = st.columns(len(future_df))
 
-for i,row in future_df.iterrows():
+status_map = {1: ("Good","#00cc96","🌿"),
+              2: ("Fair","#fec032","🌳"),
+              3: ("Moderate","#ffa15a","😷"),
+              4: ("Poor","#ef553b","⚠️"),
+              5: ("Hazardous","#ab63fa","🚨")}
+
+predictions = []
+f_cols = st.columns(3)
+
+np.random.seed(42)  # reproducibility
+
+for i, row in future_df.iterrows():
+    # --- Small variations in forecast to avoid repeated predictions ---
+    temp = float(row['temperature']) + np.random.uniform(-1.0,1.0)
+    hum = float(row['humidity']) + np.random.uniform(-2.0,2.0)
+    wind = float(row['wind_speed']) + np.random.uniform(-0.5,0.5)
+    
     feat = pd.DataFrame([{
-        'temperature': float(row['temperature']),
-        'humidity': float(row['humidity']),
-        'wind_speed': float(row['wind_speed']),
+        'temperature': temp,
+        'humidity': hum,
+        'wind_speed': wind,
         'hour': 12.0,
-        'weekday': float(row['datetime'].weekday()),
-        'month': float(row['datetime'].month),
+        'weekday': float((row['datetime'] + timedelta(hours=5)).weekday()),
+        'month': float((row['datetime'] + timedelta(hours=5)).month),
         'aqi_lag_1': float(current_aqi_lag),
         'pm2_5_rolling_6h': float(current_pm25),
-        'wind_stagnant': 1.0 if row['wind_speed']<2.0 else 0.0
+        'wind_stagnant': 1.0 if wind<2.0 else 0.0
     }])
+    
     feat = feat[FEATURE_ORDER]
     pred = model.predict(feat)[0]
     aqi_val = int(np.clip(round(pred),1,5))
-    predictions.append({'day':i+1,'date':row['datetime'].strftime('%A, %d %b'),'aqi_final':aqi_val})
     
+    predictions.append({
+        'day': i+1,
+        'date': (row['datetime'] + timedelta(hours=5)).strftime('%A, %d %b'),
+        'aqi_final': aqi_val,
+        'pred_raw': pred
+    })
+    
+    # --- Update lag features ---
     current_aqi_lag = pred
-    humidity_factor = row['humidity']/100.0
-    wind_factor = max(0.3,1.0-row['wind_speed']/10.0)
-    pm25_drift = (pred-last_aqi)*10.0
-    current_pm25 = current_pm25*(0.80+0.35*humidity_factor*wind_factor)+pm25_drift
-    current_pm25 = np.clip(current_pm25,5.0,200.0)
+    humidity_factor = hum / 100.0
+    wind_factor = max(0.3, 1.0 - wind / 10.0)
+    pm25_drift = (pred - last_aqi) * 10.0
+    current_pm25 = current_pm25*(0.80 + 0.35*humidity_factor*wind_factor) + pm25_drift
+    current_pm25 = np.clip(current_pm25, 5.0, 200.0)
     
     label,color,icon = status_map.get(aqi_val,("Unknown","#666","❓"))
     
-    if aqi_val>=4:
-        st.toast(f"⚠️ Health Risk: {label} on {row['datetime'].strftime('%A')}", icon="😷")
-        if i==0: st.error(f"🚨 ALERT: Level {aqi_val} AQI predicted for {row['datetime'].strftime('%A')}")
+    if aqi_val >=4:
+        st.toast(f"⚠️ Health Risk: {label} on {(row['datetime'] + timedelta(hours=5)).strftime('%A')}", icon="😷")
+        if i==0:
+            st.error(f"🚨 ALERT: Level {aqi_val} AQI predicted for {(row['datetime'] + timedelta(hours=5)).strftime('%A')}")
     
     with f_cols[i]:
         st.markdown(f"""
         <div class="metric-card" style="border-top:5px solid {color};">
-            <p style="color:#888; font-size:0.85rem;">{row['datetime'].strftime('%A, %d %b')}</p>
+            <p style="color:#888; font-size:0.85rem;">{(row['datetime'] + timedelta(hours=5)).strftime('%A, %d %b')}</p>
             <h2 style="color:{color}; margin:10px 0;">{icon} {label}</h2>
             <p class="aqi-val" style="color:{color};">{aqi_val}</p>
         </div>
         """, unsafe_allow_html=True)
 
-# --- PREDICTION DEBUG ---
+# --- DEBUG TABLE ---
 with st.expander("🔍 Prediction Details"):
     st.dataframe(pd.DataFrame(predictions))
 
