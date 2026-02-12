@@ -1,19 +1,22 @@
 import os
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone, timedelta
-from meteostat import Point, Hourly, Daily # Daily added for forecast
+from meteostat import Point, Hourly, Daily
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Islamabad constant point
+ISL_LAT, ISL_LON = 33.72, 73.04
+ISL_LOCATION = Point(ISL_LAT, ISL_LON, 540)
+
 def fetch_weather_history(days=120):
-    lat, lon = 33.72, 73.04
-    location = Point(lat, lon)
     now_time = datetime.now() 
     start_time = now_time - timedelta(days=days)
     
-    data = Hourly(location, start_time, now_time)
+    data = Hourly(ISL_LOCATION, start_time, now_time)
     df = data.fetch()
     
     if df.empty: return pd.DataFrame()
@@ -29,41 +32,49 @@ def fetch_weather_history(days=120):
         df['datetime'] = df['datetime'].dt.tz_convert('UTC')
     return df
 
-# --- NEXT 3 DAYS FORECAST FUNCTION ---
-def fetch_weather_forecast(days=3):
-    """Meteostat se aglay 3 din ka predicted weather lata hai."""
-    lat, lon = 33.72, 73.04
-    location = Point(lat, lon)
-    
+def fetch_weather_forecast(days=4):
+    """Meteostat se aglay 4 din ka predicted weather lata hai."""
     # Forecast starts from today
     start = datetime.now()
     end = start + timedelta(days=days)
     
-    # Hourly forecast (Meteostat models predict ahead)
-    data = Hourly(location, start, end)
-    df = data.fetch()
-    
-    if df.empty:
+    # Hourly data fetch karke usay resample karenge (zyada reliable hai)
+    try:
+        data = Hourly(ISL_LOCATION, start, end)
+        df = data.fetch()
+        
+        if df.empty:
+            # Agar Hourly fail ho to Daily try karein
+            data = Daily(ISL_LOCATION, start, end)
+            df = data.fetch()
+            if df.empty: return pd.DataFrame()
+            df.rename(columns={'tavg': 'temp', 'rhum': 'rhum', 'wspd': 'wspd'}, inplace=True)
+        
+        df.reset_index(inplace=True)
+        # Rename 'time' to 'datetime' for resampling
+        df.rename(columns={'time': 'datetime'}, inplace=True)
+        
+        # Rozana ki averages nikalna
+        forecast_daily = df.resample('D', on='datetime').agg({
+            'temp': 'mean',
+            'rhum': 'mean',
+            'wspd': 'mean'
+        }).reset_index()
+        
+        # Missing values fill karein (prediction crash na ho)
+        forecast_daily['rhum'] = forecast_daily['rhum'].ffill().fillna(50.0)
+        forecast_daily['wspd'] = forecast_daily['wspd'].ffill().fillna(5.0)
+        
+        forecast_daily.rename(columns={
+            'temp': 'temperature', 
+            'rhum': 'humidity', 
+            'wspd': 'wind_speed'
+        }, inplace=True)
+        
+        return forecast_daily.head(days)
+    except Exception as e:
+        print(f"Weather Forecast Error: {e}")
         return pd.DataFrame()
-    
-    df.reset_index(inplace=True)
-    # Humein rozana ki aik average reading chahiye prediction ke liye
-    df['datetime'] = pd.to_datetime(df['time'])
-    
-    # Rozana ki averages nikalna
-    forecast_daily = df.resample('D', on='datetime').agg({
-        'temp': 'mean',
-        'rhum': 'mean',
-        'wspd': 'mean'
-    }).reset_index()
-    
-    forecast_daily.rename(columns={
-        'temp': 'temperature', 
-        'rhum': 'humidity', 
-        'wspd': 'wind_speed'
-    }, inplace=True)
-    
-    return forecast_daily.head(days)
 
 def fetch_raw_pollution(days=120):
     API_KEY = os.getenv("OPENWEATHER_KEY")
@@ -72,22 +83,24 @@ def fetch_raw_pollution(days=120):
     end_ts = int(now_utc.timestamp())
     start_ts = end_ts - (days * 86400)
     
-    params = {"lat": 33.72, "lon": 73.04, "start": start_ts, "end": end_ts, "appid": API_KEY}
-    res = requests.get(url, params=params).json()
-    
-    if 'list' not in res: return pd.DataFrame()
+    params = {"lat": ISL_LAT, "lon": ISL_LON, "start": start_ts, "end": end_ts, "appid": API_KEY}
+    try:
+        res = requests.get(url, params=params).json()
+        if 'list' not in res: return pd.DataFrame()
 
-    data_list = []
-    for entry in res['list']:
-        data_list.append({
-            "datetime": datetime.fromtimestamp(entry['dt'], tz=timezone.utc),
-            "city": "Islamabad",
-            "aqi": float(entry['main']['aqi']),
-            "pm2_5": float(entry['components']['pm2_5']),
-            "no2": float(entry['components']['no2']),
-            "so2": float(entry['components']['so2'])
-        })
-    return pd.DataFrame(data_list)
+        data_list = []
+        for entry in res['list']:
+            data_list.append({
+                "datetime": datetime.fromtimestamp(entry['dt'], tz=timezone.utc),
+                "city": "Islamabad",
+                "aqi": float(entry['main']['aqi']),
+                "pm2_5": float(entry['components']['pm2_5']),
+                "no2": float(entry['components']['no2']),
+                "so2": float(entry['components']['so2'])
+            })
+        return pd.DataFrame(data_list)
+    except:
+        return pd.DataFrame()
 
 def clean_and_merge(pol_df, wea_df):
     if pol_df.empty or wea_df.empty: return pd.DataFrame()
@@ -117,29 +130,29 @@ def apply_feature_engineering(df):
     return df.fillna(0)
 
 def fetch_historical_aqi_data(fs, num_days=7):
-    """
-    Hopsworks Feature Store se pichle 7 din ka data nikalta hai taake dashboard par graph dikhaya ja sakay.
-    """
+    """Hopsworks se pichle 7 din ka data nikalna with Hive compatibility."""
     try:
-        # 1. Feature Group connect karein (v5 as you mentioned)
         fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
         
-        # 2. Poora data read karein
-        # (Chunke data zyada bada nahi hota, read() fine hai, warna query bhi use ho sakti hai)
-        query_df = fg.read()
+        # Hive mode on for stability in Cloud environments
+        query_df = fg.read(read_options={"use_hive": True})
         
-        # 3. Filter for last 7 days
+        if query_df.empty:
+            return pd.DataFrame()
+
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=num_days)
         
-        # Datetime ensure karein
         query_df['datetime'] = pd.to_datetime(query_df['datetime'])
         if query_df['datetime'].dt.tz is None:
             query_df['datetime'] = query_df['datetime'].dt.tz_localize('UTC')
+        else:
+            query_df['datetime'] = query_df['datetime'].dt.tz_convert('UTC')
         
         historical_df = query_df[query_df['datetime'] >= start_date]
         
-        # 4. Rozana ki average nikalna (Daily Trend ke liye)
+        if historical_df.empty: return pd.DataFrame()
+
         historical_df['date_only'] = historical_df['datetime'].dt.date
         daily_avg = historical_df.groupby('date_only')['aqi'].mean().reset_index()
         daily_avg.rename(columns={'date_only': 'Date', 'aqi': 'Average AQI'}, inplace=True)
