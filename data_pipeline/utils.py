@@ -1,88 +1,76 @@
 import os
-import pandas as pd
 import requests
-from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone, timedelta
+from meteostat import Point, Hourly
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- HISTORICAL WEATHER (still Meteostat) ---
-from meteostat import Point, Hourly
-
-def fetch_weather_history(days=120):
+# --- FORECAST FIX (The reason for '1') ---
+def fetch_weather_forecast(days=3):
     lat, lon = 33.72, 73.04
     location = Point(lat, lon)
-    now_time = datetime.utcnow()
-    start_time = now_time - timedelta(days=days)
     
-    data = Hourly(location, start_time, now_time)
-    df = data.fetch()
-    if df.empty: return pd.DataFrame()
+    # Current time se lekar 3 din aagay tak
+    start = datetime.now()
+    end = start + timedelta(days=days)
     
-    available_cols = [c for c in ['temp', 'rhum', 'wspd'] if c in df.columns]
-    df = df[available_cols]
-    df.reset_index(inplace=True)
-    df.rename(columns={'time':'datetime','temp':'temperature','rhum':'humidity','wspd':'wind_speed'}, inplace=True)
+    try:
+        data = Hourly(location, start, end)
+        df = data.fetch()
+        
+        if df.empty:
+            # Fallback: Agar Meteostat data na de toh Islamabad ka average weather use karein
+            # Taake model 0 values dekh kar AQI 1 na predict kare
+            print("⚠️ Meteostat empty, using seasonal fallbacks")
+            dates = [start + timedelta(days=i) for i in range(days + 1)]
+            return pd.DataFrame({
+                'datetime': dates,
+                'temperature': [18.0] * len(dates), 
+                'humidity': [50.0] * len(dates),
+                'wind_speed': [5.0] * len(dates)
+            })
+
+        df.reset_index(inplace=True)
+        df.rename(columns={'time': 'datetime', 'temp': 'temperature', 'rhum': 'humidity', 'wspd': 'wind_speed'}, inplace=True)
+
+        # Rozana ki Max/Mean ka mix taake model sensitive rahe
+        forecast_daily = df.resample('D', on='datetime').agg({
+            'temperature': 'max', # Din ka garam waqt AQI ko affect karta hai
+            'humidity': 'mean',
+            'wind_speed': 'min'  # Sabse kam hawa (stagnation) AQI kharab karti hai
+        }).reset_index()
+        
+        return forecast_daily.head(days + 1)
+    except Exception as e:
+        print(f"Forecast Error: {e}")
+        return pd.DataFrame()
+
+# --- FEATURE ENGINEERING SYNC ---
+def apply_feature_engineering(df):
+    if df.empty: return df
+    df = df.sort_values("datetime").drop_duplicates(subset=['datetime'])
+    
+    df['hour'] = df['datetime'].dt.hour.astype(float)
+    df['weekday'] = df['datetime'].dt.weekday.astype(float)
+    df['month'] = df['datetime'].dt.month.astype(float)
+    
+    # Lags logic
+    if 'aqi' in df.columns:
+        df['aqi_lag_1'] = df['aqi'].shift(1)
+    
+    if 'pm2_5' in df.columns:
+        # Rolling mean for 6 hours
+        df['pm2_5_rolling_6h'] = df['pm2_5'].rolling(window=6, min_periods=1).mean()
+    
+    # Wind Stagnation: Islamabad context mein 2.5-3.0 km/h se kam hawa zeher hai
+    if 'wind_speed' in df.columns:
+        df['wind_stagnant'] = (df['wind_speed'] < 2.5).astype(float)
+    
+    # Fill gaps taake model ko 0 na miley (0 = AQI 1 error)
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    df[numeric_cols] = df[numeric_cols].ffill().bfill()
     
     return df
-
-# --- OPENWEATHERMAP 3-DAY FORECAST ---
-def fetch_weather_forecast(days=3):
-    """
-    Fetch next `days` forecast from OpenWeatherMap API
-    """
-    API_KEY = os.getenv("OPENWEATHER_KEY")
-    if not API_KEY:
-        return pd.DataFrame()
-    
-    lat, lon = 33.72, 73.04
-    url = f"https://api.openweathermap.org/data/2.5/forecast"
-    params = {
-        "lat": lat,
-        "lon": lon,
-        "appid": API_KEY,
-        "units": "metric"
-    }
-    
-    try:
-        res = requests.get(url, params=params, timeout=10).json()
-        if "list" not in res: 
-            return pd.DataFrame()
-        
-        df_list = []
-        for item in res["list"]:
-            dt = datetime.utcfromtimestamp(item["dt"])
-            temp = item["main"]["temp"]
-            humidity = item["main"]["humidity"]
-            wind_speed = item["wind"]["speed"]
-            df_list.append({"datetime": dt, "temperature": temp, "humidity": humidity, "wind_speed": wind_speed})
-        
-        df = pd.DataFrame(df_list)
-        df.set_index("datetime", inplace=True)
-        # Take daily average
-        daily_df = df.resample("D").mean().reset_index()
-        return daily_df.head(days)
-    
-    except Exception as e:
-        print(f"Weather forecast fetch error: {e}")
-        return pd.DataFrame()
-
-
-# --- HISTORICAL AQI (Hopsworks) ---
-def fetch_historical_aqi_data(fs, num_days=7):
-    try:
-        fg = fs.get_feature_group(name="islamabad_aqi_v12", version=5)
-        query_df = fg.read()
-        end_date = datetime.utcnow()
-        start_date = end_date - timedelta(days=num_days)
-        
-        query_df['datetime'] = pd.to_datetime(query_df['datetime'])
-        historical_df = query_df[query_df['datetime'] >= start_date]
-        historical_df['date_only'] = historical_df['datetime'].dt.date
-        daily_avg = historical_df.groupby('date_only')['aqi'].mean().reset_index()
-        daily_avg.rename(columns={'date_only':'Date','aqi':'Average AQI'}, inplace=True)
-        return daily_avg.sort_values('Date')
-    
-    except Exception as e:
-        print(f"Error fetching historical data: {e}")
-        return pd.DataFrame()
