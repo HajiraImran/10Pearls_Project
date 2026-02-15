@@ -1,3 +1,4 @@
 https://drive.google.com/file/d/155UtdVXucB_o3ZrKOjawqyyrPVz_haiD/view?usp=sharing
 
-colab notebook code for all visualizations
+// Colab notebook code for complete visualizations
+// If a PDF file is not visible here, then you can view it after downloading.
